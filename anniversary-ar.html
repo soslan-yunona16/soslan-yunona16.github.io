@@ -272,7 +272,7 @@
                 createHearts(modelLoader);
             }
             if (sceneConfig.musical_key.enabled) {
-                modelLoader.load('musical_key.glb', (gltf) => {
+                modelLoader.load('assets/musical_key.glb', (gltf) => {
                     const musicalKey = gltf.scene;
                     musicalKey.name = 'musical_key_trigger';
                     const mKeyConf = sceneConfig.musical_key;
