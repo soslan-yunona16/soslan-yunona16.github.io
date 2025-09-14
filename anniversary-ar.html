@@ -192,7 +192,7 @@
                 const rings = new THREE.Group();
                 rings.name = 'rings';
                 sceneGroup.add(rings);
-                modelLoader.load('free_ring.glb', (gltf) => {
+                modelLoader.load('assets/free_ring.glb', (gltf) => {
                     const loadedRing = gltf.scene;
                     const animEnabled = sceneConfig.intro_animation.enabled;
 
