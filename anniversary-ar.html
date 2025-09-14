@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <title>Anniversary AR</title>
+    <meta charset="UTF-8">
+    <style>
+        body { 
+            margin: 0;
+            overflow: hidden;
+        }
+        #container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        #loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            font-family: sans-serif;
+            font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading-overlay">
+        <div id="loading-progress">Загрузка...</div>
+    </div>
+    <audio id="background-music" loop src="assets/music.mp3"></audio>
+        <video id="tv-video" playsinline style="display:none"></video>
+    <script src="https://unpkg.com/@tweenjs/tween.js@^23/dist/tween.umd.js"></script>
+    <script>document.write(`<script src='scene-config.js?v=${new Date().getTime()}'><\/script>`);</script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+        import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+        import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+
+        let camera, scene, renderer, controller;
+        let reticle, sceneGroup;
+        const pointer = new THREE.Vector2();
+        const raycaster = new THREE.Raycaster();
+        let clock;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+
+        let particles, heartsGroup;
+        const pulsatingObjects = [];
+        let musicalKeyObject = null;
+        let tvObject = null;
+        let tvVideoTexture = null;
+        let playIcon = null;
+        let musicWasPlaying = false;
+        const DUCKED_VOLUME = 0.1;
+
+        let ring1, ring2, textMesh1, textMesh2; // Animatable objects
+
+        const degToRad = (deg) => deg * (Math.PI / 180);
+
+        init();
+        animate();
+
+        function init() {
+            const container = document.createElement('div');
+            container.id = 'container';
+            document.body.appendChild(container);
+
+            clock = new THREE.Clock();
+
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+            scene.add(camera);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            container.appendChild(renderer.domElement);
+
+            controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onSelect);
+            scene.add(controller);
+
+            reticle = new THREE.Mesh(
+                new THREE.RingGeometry(0.05, 0.07, 32).rotateX(-Math.PI / 2),
+                new THREE.MeshBasicMaterial()
+            );
+            reticle.matrixAutoUpdate = false;
+            reticle.visible = false;
+            scene.add(reticle);
+
+            loadAssetsAndCreateScene();
+
+            const arButton = ARButton.createButton(renderer, {
+                requiredFeatures: ['hit-test'],
+                domOverlay: { root: document.body }
+            });
+            // Make AR button larger
+            arButton.style.padding = '18px';
+            arButton.style.fontSize = '16px';
+            arButton.style.width = '180px';
+            arButton.style.height = '60px';
+
+            document.body.appendChild(arButton);
+
+            
+            window.addEventListener('resize', onWindowResize);
+        }
+
+                function loadAssetsAndCreateScene() {
+            const loadingManager = new THREE.LoadingManager();
+            const loadingOverlay = document.getElementById('loading-overlay');
+            const loadingProgress = document.getElementById('loading-progress');
+
+            loadingManager.onStart = function ( url, itemsLoaded, itemsTotal ) {
+                loadingProgress.textContent = `Загрузка: 0/${itemsTotal} ассетов`;
+            };
+
+            loadingManager.onLoad = function () {
+                loadingOverlay.style.display = 'none';
+                // Animation is now triggered by onSelect after placement
+            };
+
+            loadingManager.onProgress = function ( url, itemsLoaded, itemsTotal ) {
+                loadingProgress.textContent = `Загрузка: ${itemsLoaded}/${itemsTotal} ассетов`;
+            };
+
+            loadingManager.onError = function ( url ) {
+                loadingProgress.textContent = 'Ошибка при загрузке ' + url;
+            };
+
+
+            sceneGroup = new THREE.Group();
+            scene.add(sceneGroup);
+            // Make scene invisible by default, will be shown on AR select
+            sceneGroup.visible = false;
+
+            // Add lights to the scene group for consistent lighting
+            const ambientLight = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1.5);
+            sceneGroup.add(ambientLight);
+
+            // Key light (main)
+            const keyLight = new THREE.DirectionalLight(0xffffff, 2.5);
+            keyLight.position.set(1, 1, 1); // Top-right-front
+            sceneGroup.add(keyLight);
+
+            // Fill light (secondary)
+            const fillLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            fillLight.position.set(-1, 0.5, 1); // Top-left-front
+            sceneGroup.add(fillLight);
+
+            const goldMaterial = new THREE.MeshStandardMaterial({
+                color: 0xFFD700, 
+                metalness: 0.9, 
+                roughness: 0.2,
+                emissive: 0xFFD700, 
+                emissiveIntensity: sceneConfig.glow.enabled ? 1 : 0
+            });
+
+            const modelLoader = new GLTFLoader(loadingManager);
+            const textureLoader = new THREE.TextureLoader(loadingManager);
+            const fontLoader = new FontLoader(loadingManager);
+
+            const rgbeLoader = new RGBELoader(loadingManager);
+            rgbeLoader.load('assets/qwantani_moonrise_puresky_1k.hdr', (texture) => {
+                texture.mapping = THREE.EquirectangularReflectionMapping;
+                scene.environment = texture;
+            });
+
+            if (sceneConfig.rings.enabled) {
+                const rings = new THREE.Group();
+                rings.name = 'rings';
+                sceneGroup.add(rings);
+                modelLoader.load('free_ring.glb', (gltf) => {
+                    const loadedRing = gltf.scene;
+                    const animEnabled = sceneConfig.intro_animation.enabled;
+
+                    // Ring 1
+                    ring1 = loadedRing.clone();
+                    ring1.traverse((child) => { if (child.isMesh) child.material = goldMaterial.clone(); });
+                    ring1.scale.set(sceneConfig.rings.scale, sceneConfig.rings.scale, sceneConfig.rings.scale);
+                    const rConf1 = sceneConfig.rings.ring1;
+                    if (animEnabled) {
+                        ring1.position.set(-0.3, 0.2, -0.2); // Animation start position
+                    } else {
+                        ring1.position.set(rConf1.position.x, rConf1.position.y, rConf1.position.z);
+                        ring1.rotation.set(degToRad(rConf1.rotation.x), degToRad(rConf1.rotation.y), degToRad(rConf1.rotation.z));
+                    }
+                    rings.add(ring1);
+
+                    // Ring 2
+                    ring2 = loadedRing.clone();
+                    ring2.traverse((child) => { if (child.isMesh) child.material = goldMaterial.clone(); });
+                    ring2.scale.set(sceneConfig.rings.scale, sceneConfig.rings.scale, sceneConfig.rings.scale);
+                    const rConf2 = sceneConfig.rings.ring2;
+                     if (animEnabled) {
+                        ring2.position.set(0.3, 0.2, -0.2); // Animation start position
+                    } else {
+                        ring2.position.set(rConf2.position.x, rConf2.position.y, rConf2.position.z);
+                        ring2.rotation.set(degToRad(rConf2.rotation.x), degToRad(rConf2.rotation.y), degToRad(rConf2.rotation.z));
+                    }
+                    rings.add(ring2);
+
+                    if(sceneConfig.glow.enabled) pulsatingObjects.push(ring1, ring2);
+                });
+            }
+
+            if (sceneConfig.text.enabled) {
+                fontLoader.load('Russian font.json', (font) => {
+                    const tConf = sceneConfig.text;
+                    const animEnabled = sceneConfig.intro_animation.enabled;
+
+                    // Text 1
+                    const textMaterial1 = goldMaterial.clone();
+                    if (animEnabled) {
+                        textMaterial1.transparent = true;
+                        textMaterial1.opacity = 0;
+                    }
+                    const text1Geometry = new TextGeometry(tConf.line1.content, { font: font, size: 0.03, depth: 0.005 });
+                    text1Geometry.center();
+                    textMesh1 = new THREE.Mesh(text1Geometry, textMaterial1);
+                    textMesh1.position.set(tConf.line1.position.x, tConf.line1.position.y, tConf.line1.position.z);
+                    sceneGroup.add(textMesh1);
+
+                    // Text 2
+                    const textMaterial2 = goldMaterial.clone();
+                    if (animEnabled) {
+                        textMaterial2.transparent = true;
+                        textMaterial2.opacity = 0;
+                    }
+                    const text2Geometry = new TextGeometry(tConf.line2.content, { font: font, size: 0.03, depth: 0.005 });
+                    text2Geometry.center();
+                    textMesh2 = new THREE.Mesh(text2Geometry, textMaterial2);
+                    textMesh2.position.set(tConf.line2.position.x, tConf.line2.position.y, tConf.line2.position.z);
+                    sceneGroup.add(textMesh2);
+
+                    if(sceneConfig.glow.enabled) pulsatingObjects.push(textMesh1, textMesh2);
+                });
+            }
+
+            if (sceneConfig.photos.enabled) {
+                loadPhotoTextures(goldMaterial, textureLoader);
+            }
+            if (sceneConfig.flowers.enabled) {
+                createFlowers();
+            }
+            if (sceneConfig.particles.enabled) {
+                createParticles();
+            }
+            if (sceneConfig.hearts.enabled) {
+                createHearts(modelLoader);
+            }
+            if (sceneConfig.musical_key.enabled) {
+                modelLoader.load('musical_key.glb', (gltf) => {
+                    const musicalKey = gltf.scene;
+                    musicalKey.name = 'musical_key_trigger';
+                    const mKeyConf = sceneConfig.musical_key;
+                    musicalKey.scale.set(mKeyConf.scale, mKeyConf.scale, mKeyConf.scale);
+                    musicalKey.position.set(mKeyConf.position.x, mKeyConf.position.y, mKeyConf.position.z);
+                    musicalKey.rotation.set(degToRad(mKeyConf.rotation.x), degToRad(mKeyConf.rotation.y), degToRad(mKeyConf.rotation.z));
+                    
+                    musicalKey.traverse((child) => { 
+                        if (child.isMesh) {
+                            child.material = goldMaterial.clone(); 
+                        }
+                    });
+
+                    sceneGroup.add(musicalKey);
+                    musicalKeyObject = musicalKey;
+                });
+            }
+
+            if (sceneConfig.video_player.enabled) {
+                const vpConf = sceneConfig.video_player;
+                const video = document.getElementById('tv-video');
+                video.src = vpConf.video_file;
+
+                video.onloadeddata = () => {
+                    console.log("Video data loaded. Creating texture and frame.");
+                    const videoWidth = video.videoWidth;
+                    const videoHeight = video.videoHeight;
+                    const aspect = videoWidth / videoHeight;
+                    const height = vpConf.width / aspect;
+
+                    tvVideoTexture = new THREE.VideoTexture(video);
+                    const screenMaterial = new THREE.MeshBasicMaterial({ map: tvVideoTexture });
+
+                    const videoGroup = new THREE.Group();
+                    videoGroup.name = 'video_player_trigger';
+                    if (sceneConfig.intro_animation.enabled && sceneConfig.intro_animation.video_effect.enabled) {
+                        videoGroup.visible = false; // Initially hidden for animation
+                    }
+
+                    const frameWidth = vpConf.width + vpConf.borderThickness;
+                    const frameHeight = height + vpConf.borderThickness;
+
+                    // Create Front Frame
+                    const frameGeom = new THREE.PlaneGeometry(frameWidth, frameHeight);
+                    const frameMesh = new THREE.Mesh(frameGeom, goldMaterial.clone());
+                    frameMesh.position.z = -0.001;
+                    videoGroup.add(frameMesh);
+
+                    // Create Screen
+                    const screenGeom = new THREE.PlaneGeometry(vpConf.width, height);
+                    const screenMesh = new THREE.Mesh(screenGeom, screenMaterial);
+                    videoGroup.add(screenMesh);
+
+                    // Create Gold Back Panel
+                    const backPanelMaterial = goldMaterial.clone();
+                    backPanelMaterial.side = THREE.BackSide;
+                    const backPanelMesh = new THREE.Mesh(frameGeom.clone(), backPanelMaterial);
+                    backPanelMesh.position.z = -0.002;
+                    videoGroup.add(backPanelMesh);
+
+                    // Create Play Icon
+                    const playShape = new THREE.Shape();
+                    const size = 0.03;
+                    playShape.moveTo(size, 0); // Point
+                    playShape.lineTo(-size, size); // Top-left
+                    playShape.lineTo(-size, -size); // Bottom-left
+                    playShape.closePath();
+
+                    const playIconGeometry = new THREE.ShapeGeometry(playShape);
+                    playIconGeometry.center(); // Center the geometry
+                    const playIconMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+                    playIcon = new THREE.Mesh(playIconGeometry, playIconMaterial);
+                    playIcon.position.z = 0.01; // Position it in front of the screen
+                    videoGroup.add(playIcon);
+
+                    videoGroup.position.set(vpConf.position.x, vpConf.position.y, vpConf.position.z);
+                    videoGroup.rotation.set(degToRad(vpConf.rotation.x), degToRad(vpConf.rotation.y), degToRad(vpConf.rotation.z));
+                    
+                    sceneGroup.add(videoGroup);
+                    tvObject = videoGroup; 
+
+                    video.addEventListener('ended', () => {
+                        if (playIcon) playIcon.visible = true; // Show icon
+                        // Restore music volume
+                        const music = document.getElementById('background-music');
+                        if (musicWasPlaying) {
+                            music.volume /= DUCKED_VOLUME;
+                            musicWasPlaying = false;
+                        }
+                    });
+                };
+            }
+        }
+
+function startIntroAnimation() {
+    if (!sceneConfig.intro_animation.enabled) return;
+
+    const animConfig = sceneConfig.intro_animation;
+    const duration = animConfig.duration * 1000;
+    const ease = TWEEN.Easing.Exponential.Out;
+
+    // --- PHASE 1: Rings and Text ---
+    const textFadeDuration = duration * 0.7;
+    const ringMoveDuration = duration;
+
+    // Rings animation
+    if (ring1 && ring2) {
+        const rConf1 = sceneConfig.rings.ring1;
+        new TWEEN.Tween(ring1.position).to(rConf1.position, ringMoveDuration).easing(ease).start();
+        new TWEEN.Tween(ring1.rotation).to({ x: degToRad(rConf1.rotation.x), y: degToRad(rConf1.rotation.y), z: degToRad(rConf1.rotation.z) }, ringMoveDuration).easing(ease).start();
+
+        const rConf2 = sceneConfig.rings.ring2;
+        new TWEEN.Tween(ring2.position).to(rConf2.position, ringMoveDuration).easing(ease).start();
+        new TWEEN.Tween(ring2.rotation).to({ x: degToRad(rConf2.rotation.x), y: degToRad(rConf2.rotation.y), z: degToRad(rConf2.rotation.z) }, ringMoveDuration).easing(ease).start();
+    }
+
+    // Text animation
+    let lastTweenOfPhase1 = null;
+    if (textMesh1 && textMesh2) {
+        new TWEEN.Tween(textMesh1.material).to({ opacity: 1 }, textFadeDuration).easing(TWEEN.Easing.Quadratic.InOut).start();
+        lastTweenOfPhase1 = new TWEEN.Tween(textMesh2.material).to({ opacity: 1 }, textFadeDuration).delay(300).easing(TWEEN.Easing.Quadratic.InOut).start();
+    }
+
+    if (!lastTweenOfPhase1) { // Fallback if text is disabled
+        lastTweenOfPhase1 = new TWEEN.Tween({}).to({}, ringMoveDuration).start();
+    }
+
+    // --- PHASE 2: Photos ---
+    lastTweenOfPhase1.onComplete(() => {
+        const photosGroup = scene.getObjectByName('photos');
+        const photoConfig = animConfig.photo_effect;
+        if (!photosGroup || !photoConfig.enabled) return;
+
+        const photoAnimDuration = 1000; // 1 second for each photo to pop
+        const stagger = photoConfig.stagger;
+        let lastPhotoTween = null;
+
+        photosGroup.children.forEach((photoGroup, index) => {
+            // Initial state for scale & fade
+            photoGroup.scale.set(0.01, 0.01, 0.01);
+            photoGroup.traverse(child => {
+                if (child.isMesh) {
+                    if (!child.material.cloned) { // Avoid re-cloning if animation is re-run
+                        child.material = child.material.clone();
+                        child.material.cloned = true;
+                    }
+                    child.material.transparent = true;
+                    child.material.opacity = 0;
+                }
+            });
+
+            const delay = index * stagger;
+
+            // Tween for scale
+            new TWEEN.Tween(photoGroup.scale)
+                .to({ x: 1, y: 1, z: 1 }, photoAnimDuration)
+                .delay(delay)
+                .easing(TWEEN.Easing.Back.Out) // Nice pop-out effect
+                .start();
+
+            // Tween for opacity
+            photoGroup.traverse(child => {
+                if (child.isMesh) {
+                    const tween = new TWEEN.Tween(child.material)
+                        .to({ opacity: 1 }, photoAnimDuration)
+                        .delay(delay)
+                        .start();
+                    if (index === photosGroup.children.length - 1) {
+                        lastPhotoTween = tween; // Track the last tween
+                    }
+                }
+            });
+        });
+
+        // --- PHASE 3: Video ---
+        if (lastPhotoTween) {
+            lastPhotoTween.onComplete(() => {
+                const videoConfig = animConfig.video_effect;
+                const tvObject = scene.getObjectByName('video_player_trigger');
+                if (!tvObject || !videoConfig.enabled) return;
+
+                tvObject.visible = true;
+                tvObject.traverse(child => {
+                    if (child.isMesh) {
+                         if (!child.material.cloned) {
+                            child.material = child.material.clone();
+                            child.material.cloned = true;
+                        }
+                        child.material.transparent = true;
+                        child.material.opacity = 0;
+
+                        new TWEEN.Tween(child.material)
+                            .to({ opacity: 1 }, 1500)
+                            .delay(videoConfig.delay)
+                            .easing(TWEEN.Easing.Quadratic.InOut)
+                            .start();
+                    }
+                });
+            });
+        }
+    });
+}
+
+        function loadPhotoTextures(goldMaterial, textureLoader) {
+            const photos = new THREE.Group();
+            photos.name = 'photos';
+            sceneGroup.add(photos);
+
+            sceneConfig.photos.items.forEach((photoConf) => {
+                textureLoader.load(photoConf.file, (texture) => {
+                    createPhoto(texture, photoConf, photos, goldMaterial, textureLoader);
+                });
+            });
+        }
+
+        function createPhoto(texture, photoConf, parent, goldMaterial, textureLoader) {
+            const aspect = texture.image.width / texture.image.height;
+            const height = 0.15;
+            const width = height * aspect;
+            
+            const photoGroup = new THREE.Group();
+
+            const frameThickness = sceneConfig.photos.borderThickness || 0.01;
+            const frameGeom = new THREE.PlaneGeometry(width + frameThickness, height + frameThickness);
+            const frameMesh = new THREE.Mesh(frameGeom, goldMaterial.clone());
+            frameMesh.position.z = -0.001;
+            photoGroup.add(frameMesh);
+
+            const planeGeom = new THREE.PlaneGeometry(width, height);
+            const photoMat = new THREE.MeshBasicMaterial({ map: texture });
+            const photoMesh = new THREE.Mesh(planeGeom, photoMat);
+            photoGroup.add(photoMesh);
+
+            if (photoConf.backFile) {
+                textureLoader.load(photoConf.backFile, (backTexture) => {
+                    const backMat = new THREE.MeshBasicMaterial({ map: backTexture });
+                    const backMesh = new THREE.Mesh(planeGeom.clone(), backMat);
+                    backMesh.rotation.y = Math.PI;
+                    photoGroup.add(backMesh);
+                });
+            }
+
+            photoGroup.position.set(photoConf.position.x, photoConf.position.y, photoConf.position.z);
+            photoGroup.rotation.set(degToRad(photoConf.rotation.x), degToRad(photoConf.rotation.y), degToRad(photoConf.rotation.z));
+
+            // Set initial state for intro animation
+            if (sceneConfig.intro_animation.enabled && sceneConfig.intro_animation.photo_effect.enabled) {
+                photoGroup.scale.set(0.01, 0.01, 0.01);
+            }
+
+            parent.add(photoGroup);
+        }
+
+        function createFlowers() {
+            const flowers = new THREE.Group();
+            flowers.name = 'flowers';
+            sceneGroup.add(flowers);
+
+            sceneConfig.flowers.items.forEach((flowerConf) => {
+                if (!flowerConf.color) flowerConf.color = '#ffffff';
+                const flowerMaterial = new THREE.MeshStandardMaterial({ color: flowerConf.color, roughness: 0.8 });
+                const flowerGeometry = new THREE.SphereGeometry(0.04, 16, 16);
+                const flower = new THREE.Mesh(flowerGeometry, flowerMaterial);
+                flower.position.set(flowerConf.position.x, flowerConf.position.y, flowerConf.position.z);
+                
+                if (!flowerConf.rotation) {
+                    flowerConf.rotation = { x: 0, y: 0, z: 0 };
+                }
+                flower.rotation.set(degToRad(flowerConf.rotation.x), degToRad(flowerConf.rotation.y), degToRad(flowerConf.rotation.z));
+                flowers.add(flower);
+            });
+        }
+
+        function createParticles() {
+            const particleCount = sceneConfig.particles.count || 200;
+            const particlesGeometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            const velocities = new Float32Array(particleCount * 3);
+            const colors = new Float32Array(particleCount * 3);
+            const heartColors = [new THREE.Color(0xffd700), new THREE.Color(0xff69b4)];
+            const confettiColors = [new THREE.Color(0xffd700), new THREE.Color(0xffffff), new THREE.Color(0xffc0cb)];
+            for (let i = 0; i < particleCount; i++) {
+                const i3 = i * 3;
+                positions[i3] = (Math.random() - 0.5) * 1.5; positions[i3 + 1] = Math.random() * 1.5; positions[i3 + 2] = (Math.random() - 0.5) * 1.5;
+                velocities[i3] = (Math.random() - 0.5) * 0.02; velocities[i3 + 1] = 0.05 + Math.random() * 0.05; velocities[i3 + 2] = (Math.random() - 0.5) * 0.02;
+                const color = (Math.random() < 0.3) ? heartColors[Math.floor(Math.random() * heartColors.length)] : confettiColors[Math.floor(Math.random() * confettiColors.length)];
+                colors[i3] = color.r; colors[i3 + 1] = color.g; colors[i3 + 2] = color.b;
+            }
+            particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particlesGeometry.setAttribute('velocity', new THREE.BufferAttribute(velocities, 3));
+            particlesGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            const texture = new THREE.CanvasTexture(createParticleCanvas());
+            const particleMaterial = new THREE.PointsMaterial({ size: 0.03, map: texture, vertexColors: true, transparent: true, alphaTest: 0.1 });
+            particles = new THREE.Points(particlesGeometry, particleMaterial);
+            particles.visible = sceneConfig.particles.enabled;
+            sceneGroup.add(particles);
+        }
+
+        function createHearts(modelLoader) {
+                        modelLoader.load('assets/heart_in_love.glb', (gltf) => {
+                const heartMesh = gltf.scene.children[0];
+                if (!heartMesh) return;
+
+                heartsGroup = new THREE.Group();
+                heartsGroup.name = 'hearts';
+                const heartMaterial = new THREE.MeshStandardMaterial({
+                    color: 0xff0000,
+                    metalness: 0.5,
+                    roughness: 0.5
+                });
+
+                const count = sceneConfig.hearts.count;
+                for (let i = 0; i < count; i++) {
+                    const heart = heartMesh.clone();
+                    heart.material = heartMaterial;
+                    const scale = sceneConfig.hearts.scale || 0.01;
+                    heart.scale.set(scale, scale, scale);
+
+                    heart.position.set(
+                        (Math.random() - 0.5) * 1.5,
+                        Math.random() * 1.5,
+                        (Math.random() - 0.5) * 1.5
+                    );
+
+                    heart.userData.velocity = new THREE.Vector3(
+                        (Math.random() - 0.5) * 0.02,
+                        0.05 + Math.random() * 0.05,
+                        (Math.random() - 0.5) * 0.02
+                    );
+                    heartsGroup.add(heart);
+                }
+                heartsGroup.visible = sceneConfig.hearts.enabled;
+                sceneGroup.add(heartsGroup);
+            }, undefined, (error) => {
+                console.error('An error happened while loading the hearts model:', error);
+            });
+        }
+        
+        function createParticleCanvas() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 128; canvas.height = 128;
+            const context = canvas.getContext('2d');
+            const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64);
+            gradient.addColorStop(0, 'rgba(255,255,255,1)');
+            gradient.addColorStop(1, 'rgba(255,255,255,0)');
+            context.fillStyle = gradient;
+            context.fillRect(0, 0, 128, 128);
+            return canvas;
+        }
+
+        function onSelect() {
+            // Handle scene placement
+            if (reticle.visible) {
+                sceneGroup.position.setFromMatrixPosition(reticle.matrix);
+                sceneGroup.visible = true;
+
+                // Start animations after placement
+                // if (sceneConfig.intro_animation.enabled) {
+                //     startIntroAnimation();
+                // }
+                return; // Don't process interactions on the same tap as placement
+            }
+
+            // Handle interactions if scene is already placed
+            if (sceneGroup.visible) {
+                // Raycast from the center of the screen
+                pointer.x = 0;
+                pointer.y = 0;
+                raycaster.setFromCamera(pointer, camera);
+
+                const objectsToTest = [];
+                if (tvObject) objectsToTest.push(tvObject);
+                if (musicalKeyObject) objectsToTest.push(musicalKeyObject);
+
+                if (objectsToTest.length > 0) {
+                    const intersects = raycaster.intersectObjects(objectsToTest, true);
+
+                    if (intersects.length > 0) {
+                        const firstIntersected = intersects[0].object;
+                        let parentGroup = firstIntersected;
+
+                        // Traverse up to find the group we named (tvObject or musicalKeyObject)
+                        while (parentGroup.parent && parentGroup.parent !== scene) {
+                            parentGroup = parentGroup.parent;
+                            if (parentGroup === tvObject) {
+                                // Handle TV Click
+                                const video = document.getElementById('tv-video');
+                                const music = document.getElementById('background-music');
+                                if (video.paused) {
+                                    video.play().then(() => {
+                                        if(playIcon) playIcon.visible = false;
+                                        if (!music.paused) { musicWasPlaying = true; music.volume *= DUCKED_VOLUME; }
+                                    }).catch(e => { console.error(e); if(playIcon) playIcon.visible = true; });
+                                } else {
+                                    video.pause();
+                                    if(playIcon) playIcon.visible = true;
+                                    if (musicWasPlaying) { music.volume /= DUCKED_VOLUME; musicWasPlaying = false; }
+                                }
+                                return; // Exit after handling
+                            }
+                            if (parentGroup === musicalKeyObject) {
+                                // Handle Musical Key Click
+                                toggleMusic();
+                                return; // Exit after handling
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        function toggleMusic() {
+            console.log("Toggling music...");
+            const music = document.getElementById('background-music');
+            if (!music) {
+                console.error("Audio element #background-music not found!");
+                return;
+            }
+
+            if (music.paused) {
+                console.log("Attempting to play music...");
+                const playPromise = music.play();
+                if (playPromise !== undefined) {
+                    playPromise.then(_ => {
+                        console.log("Music started playing.");
+                    }).catch(error => {
+                        console.error("Failed to play music:", error);
+                    });
+                }
+            } else {
+                console.log("Pausing music.");
+                music.pause();
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function render(timestamp, frame) {
+            const delta = clock.getDelta();
+            if (frame) {
+                const referenceSpace = renderer.xr.getReferenceSpace();
+                const session = renderer.xr.getSession();
+                if (hitTestSourceRequested === false) {
+                    session.requestReferenceSpace('viewer').then(function (referenceSpace) {
+                        session.requestHitTestSource({ space: referenceSpace }).then(function (source) { hitTestSource = source; });
+                    });
+                    session.addEventListener('end', function () {
+                        hitTestSourceRequested = false;
+                        hitTestSource = null;
+                        sceneGroup.visible = false;
+                        reticle.visible = false;
+                        document.getElementById('background-music').pause();
+                    });
+                    hitTestSourceRequested = true;
+                }
+                if (hitTestSource && !sceneGroup.visible) {
+                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+                    if (hitTestResults.length) {
+                        const hit = hitTestResults[0];
+                        reticle.visible = true;
+                        reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+                    } else {
+                        reticle.visible = false;
+                    }
+                } else {
+                    reticle.visible = false;
+                }
+            }
+
+            if (tvVideoTexture) tvVideoTexture.needsUpdate = true;
+            TWEEN.update();
+
+            if (sceneGroup.visible) {
+                // Animate musical key
+                if (musicalKeyObject && sceneConfig.musical_key.animation && sceneConfig.musical_key.animation.enabled) {
+                    musicalKeyObject.rotation.y += sceneConfig.musical_key.animation.speed * delta;
+                }
+
+                if (sceneConfig.particles.enabled) animateParticles(delta);
+                if (sceneConfig.hearts.enabled) animateHearts(delta);
+                if (sceneConfig.glow.enabled) animatePulsatingObjects();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function animateParticles(delta) {
+            if (!particles) return;
+            const positions = particles.geometry.attributes.position.array;
+            const velocities = particles.geometry.attributes.velocity.array;
+            for (let i = 0; i < positions.length; i += 3) {
+                positions[i] += velocities[i] * delta * 5; positions[i + 1] += velocities[i + 1] * delta * 5; positions[i + 2] += velocities[i + 2] * delta * 5;
+                positions[i] += Math.sin(positions[i+1] * 5) * 0.001;
+                if (positions[i + 1] > 1.5) {
+                    positions[i] = (Math.random() - 0.5) * 1.5; positions[i + 1] = 0; positions[i + 2] = (Math.random() - 0.5) * 1.5;
+                }
+            }
+            particles.geometry.attributes.position.needsUpdate = true;
+        }
+
+        function animateHearts(delta) {
+            if (!heartsGroup) return;
+            heartsGroup.children.forEach(heart => {
+                heart.position.x += heart.userData.velocity.x * delta * 5;
+                heart.position.y += heart.userData.velocity.y * delta * 5;
+                heart.position.z += heart.userData.velocity.z * delta * 5;
+                heart.rotation.y += delta * 0.5;
+
+                if (heart.position.y > 1.5) {
+                    heart.position.set(
+                        (Math.random() - 0.5) * 1.5,
+                        0,
+                        (Math.random() - 0.5) * 1.5
+                    );
+                }
+            });
+        }
+
+        function animatePulsatingObjects() {
+            const pulse = (Math.sin(clock.getElapsedTime() * 2.5) + 1) / 2;
+            pulsatingObjects.forEach(obj => {
+                obj.traverse(child => {
+                    if(child.isMesh && child.material.emissive) {
+                        child.material.emissiveIntensity = pulse * 0.8 + 0.2;
+                    }
+                });
+            });
+        }
+    </script>
+</body>
+</html>tml>
