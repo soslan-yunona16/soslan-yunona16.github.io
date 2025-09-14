@@ -191,7 +191,7 @@ const sceneConfig = {
     "borderThickness": 0.015
   },
   "intro_animation": {
-    "enabled": true,
+    "enabled": false,
     "duration": 2.5,
     "photo_effect": {
       "enabled": true,
