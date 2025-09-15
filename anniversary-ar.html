@@ -630,9 +630,9 @@ function startIntroAnimation() {
                 sceneGroup.visible = true;
 
                 // Start animations after placement
-                // if (sceneConfig.intro_animation.enabled) {
-                //     startIntroAnimation();
-                // }
+                 if (sceneConfig.intro_animation.enabled) {
+                     startIntroAnimation();
+                 }
                 return; // Don't process interactions on the same tap as placement
             }
 
